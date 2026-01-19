@@ -2,3 +2,4 @@
 bastion_host: "my_great_bastion"
 bastion_port: 22
 bastion_user: "my_bastion_user"
+# totp_callback_command: "oathtool --totp --base32 YOURSECRETKEY"

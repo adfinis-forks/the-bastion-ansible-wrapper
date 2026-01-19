@@ -4,7 +4,12 @@ import getpass
 import os
 import sys
 
-from lib import find_executable, get_hostvars, manage_conf_file
+from lib import (
+    find_executable,
+    get_hostvars,
+    get_totp_from_callback,
+    manage_conf_file,
+)
 
 
 def main():
@@ -13,6 +18,7 @@ def main():
     bastion_user = None
     bastion_host = None
     bastion_port = None
+    totp_callback_command = None
     remote_user = None
     remote_port = 22
     default_configuration_file = "/etc/ovh/bastion/config.yml"
@@ -54,11 +60,14 @@ def main():
 
     # read from configuration file
     if not bastion_host or not bastion_port or not bastion_user:
-        bastion_host, bastion_port, bastion_user = manage_conf_file(
-            os.getenv("BASTION_CONF_FILE", default_configuration_file),
-            bastion_host,
-            bastion_port,
-            bastion_user,
+        bastion_host, bastion_port, bastion_user, totp_callback_command = (
+            manage_conf_file(
+                os.getenv("BASTION_CONF_FILE", default_configuration_file),
+                bastion_host,
+                bastion_port,
+                bastion_user,
+                os.environ.get("BASTION_TOTP_CALLBACK"),
+            )
         )
 
     # lookup on the inventory may take some time, depending on the source, so use it only if not defined elsewhere
@@ -71,6 +80,10 @@ def main():
             "bastion_user", os.environ.get("BASTION_USER", getpass.getuser())
         )
         bastion_host = hostvar.get("bastion_host", os.environ.get("BASTION_HOST"))
+        if not totp_callback_command:
+            totp_callback_command = hostvar.get(
+                "totp_callback_command", os.environ.get("BASTION_TOTP_CALLBACK")
+            )
 
     # syscall exec
     args = (
@@ -99,10 +112,71 @@ def main():
         ]
     )
 
-    os.execv(
-        find_executable("ssh"),  # absolute path mandatory
-        [str(e).strip() for e in args],  # execv() arg 2 must contain only strings
-    )
+    if totp_callback_command:
+        try:
+            import pexpect
+        except ImportError:
+            print(
+                "Error: pexpect module is required for TOTP support. Install it with: pip install pexpect",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        child = pexpect.spawn(
+            find_executable("ssh"),
+            [str(e).strip() for e in args][1:],
+            echo=False,
+        )
+
+        try:
+            index = child.expect(
+                [
+                    r"(?i)(verification code)",
+                    pexpect.EOF,
+                    pexpect.TIMEOUT,
+                ],
+                timeout=30,
+            )
+
+            if index == 0:  # TOTP prompt
+                totp = get_totp_from_callback(totp_callback_command)
+                if totp:
+                    child.sendline(totp)
+                    child.interact()
+                    child.close()
+                    exit_status = (
+                        child.exitstatus if child.exitstatus is not None else 0
+                    )
+                    sys.exit(exit_status)
+                else:
+                    print(
+                        "\nError: Failed to get TOTP code from callback command",
+                        file=sys.stderr,
+                    )
+                    child.close()
+                    sys.exit(1)
+            elif index == 1:  # EOF
+                child.interact()
+            else:  # Timeout
+                child.close()
+                sys.exit(1)
+
+            child.close()
+            exit_status = child.exitstatus if child.exitstatus is not None else 0
+            sys.exit(exit_status)
+
+        except pexpect.exceptions.EOF:
+            child.close()
+            sys.exit(child.exitstatus if child.exitstatus is not None else 1)
+
+        except Exception:
+            child.close()
+            sys.exit(1)
+    else:
+        os.execv(
+            find_executable("ssh"),  # absolute path mandatory
+            [str(e).strip() for e in args],  # execv() arg 2 must contain only strings
+        )
 
 
 if __name__ == "__main__":

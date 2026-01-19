@@ -119,7 +119,9 @@ def get_hostvars(host) -> dict:
     return {}
 
 
-def manage_conf_file(conf_file, bastion_host, bastion_port, bastion_user):
+def manage_conf_file(
+    conf_file, bastion_host, bastion_port, bastion_user, totp_callback_command=None
+):
     """Fetch the bastion vars from a config file.
 
     There will be set if not already defined, and before looking in the ansible inventory
@@ -137,11 +139,13 @@ def manage_conf_file(conf_file, bastion_host, bastion_port, bastion_user):
                     bastion_port = yaml_conf.get("bastion_port")
                 if not bastion_user:
                     bastion_user = yaml_conf.get("bastion_user")
+                if totp_callback_command is None:
+                    totp_callback_command = yaml_conf.get("totp_callback_command")
 
         except (YAMLError, IOError) as e:
             print("Error loading yaml file: {}".format(e))
 
-    return bastion_host, bastion_port, bastion_user
+    return bastion_host, bastion_port, bastion_user, totp_callback_command
 
 
 def get_var_within(my_value, hostvar, check_list=None):
@@ -245,8 +249,42 @@ def get_bastion_vars(host_vars):
     bastion_host = host_vars.get("bastion_host")
     bastion_user = host_vars.get("bastion_user")
     bastion_port = host_vars.get("bastion_port")
+
+    totp_callback_command = host_vars.get("totp_callback_command")
     return {
         "bastion_host": bastion_host,
         "bastion_port": bastion_port,
         "bastion_user": bastion_user,
+        "totp_callback_command": totp_callback_command,
     }
+
+
+def get_totp_from_callback(callback_command):
+    """Execute the TOTP callback command to retrieve the OTP code.
+
+    :param callback_command: Command to execute that returns the TOTP code
+    :return: TOTP code as string, or None if failed
+    :rtype: str or None
+    """
+    if not callback_command:
+        return None
+
+    try:
+        result = subprocess.run(
+            callback_command, shell=True, capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            totp_code = result.stdout.strip()
+            return totp_code
+        else:
+            error_msg = f"TOTP callback command failed with exit code {result.returncode}: {result.stderr}"
+            logging.error(error_msg)
+            return None
+    except subprocess.TimeoutExpired:
+        error_msg = "TOTP callback command timed out after 30 seconds"
+        logging.error(error_msg)
+        return None
+    except Exception as e:
+        error_msg = f"Error executing TOTP callback command: {e}"
+        logging.error(error_msg)
+        return None

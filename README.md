@@ -192,6 +192,16 @@ Or by using the following environment variables:
 * `ANSIBLE_SCP_EXTRA_ARGS`
 * `ANSIBLE_SCP_EXECUTABLE`
 
+## TOTP
+
+If your Bastion requires TOTP authentication, this wrapper can hook into the interactive login process and enter the required TOTP code for you. `TOTP_CALLBACK_COMMAND` defined the command executed to fetch the TOTP code.  
+
+For this to work, you need to explicitly enable keyboard-interactive authentication:
+```
+# Allow keyboard-interactive auth
+export ANSIBLE_SSH_ARGS="-C -o ControlMaster=auto -o ControlPersist=600s -o KbdInteractiveAuthentication=yes -o PreferredAuthentications=publickey,keyboard-interactive"
+```
+
 ## Configuration example
 
 File ansible.cfg:
