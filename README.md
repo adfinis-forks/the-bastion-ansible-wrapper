@@ -194,7 +194,7 @@ Or by using the following environment variables:
 
 ## TOTP
 
-If your Bastion requires TOTP authentication, this wrapper can hook into the interactive login process and enter the required TOTP code for you. `TOTP_CALLBACK_COMMAND` defined the command executed to fetch the TOTP code.  
+If your Bastion requires TOTP authentication, this wrapper can hook into the interactive login process and enter the required TOTP code for you. `TOTP_CALLBACK_COMMAND` defined the command executed to fetch the TOTP code.
 
 For this to work, you need to explicitly enable keyboard-interactive authentication:
 ```
