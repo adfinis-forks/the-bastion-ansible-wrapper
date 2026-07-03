@@ -60,7 +60,6 @@ def main():
     # lookup on the inventory may take some time, depending on the source, so use it only if not defined elsewhere
     # it seems like some module like template does not send env vars too...
     if not bastion_host or not bastion_port or not bastion_user:
-
         # check if running on AWX, we'll get the vars in a different way
         awx_inventory_file = awx_get_inventory_file()
         if os.path.exists(awx_inventory_file):
@@ -84,13 +83,15 @@ def main():
         )
 
     for i, e in enumerate(argv):
-
         if e.startswith("User="):
             remote_user = e.split("=")[-1]
             argv[i] = "User={}".format(bastion_user)
         elif e.startswith("Port="):
             remote_port = e.split("=")[-1]
             argv[i] = "Port={}".format(bastion_port)
+
+    if not remote_user:
+        remote_user = bastion_user
 
     # syscall exec
     args = (

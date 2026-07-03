@@ -49,6 +49,9 @@ def main():
         )
         bastion_host = inventory.get("bastion_host", os.getenv("BASTION_HOST"))
 
+    if not remote_user:
+        remote_user = bastion_user
+
     args = [
         "ssh",
         "{}@{}".format(bastion_user, bastion_host),
