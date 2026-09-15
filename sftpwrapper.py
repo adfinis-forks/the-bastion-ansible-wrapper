@@ -17,6 +17,8 @@ def main():
     remote_port = 22
     default_configuration_file = "/etc/ovh/bastion/config.yml"
 
+    ssh_opts = []
+
     iteration = enumerate(argv)
     for i, e in iteration:
         if e == "-o" and argv[i + 1].startswith("User="):
@@ -24,6 +26,9 @@ def main():
             next(iteration)
         elif e == "-o" and argv[i + 1].startswith("Port="):
             remote_port = argv[i + 1].split("=")[-1]
+            next(iteration)
+        elif e == "-i" or (e == "-o" and argv[i + 1].startswith("UserKnownHostsFile=")):
+            ssh_opts += [e, argv[i + 1]]
             next(iteration)
 
     sftpcmd = argv.pop()
@@ -52,24 +57,29 @@ def main():
     if not remote_user:
         remote_user = bastion_user
 
-    args = [
-        "ssh",
-        "{}@{}".format(bastion_user, bastion_host),
-        "-p",
-        bastion_port,
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-T",
-        "--",
-        "--user",
-        remote_user,
-        "--port",
-        remote_port,
-        "--host",
-        host,
-        "--osh",
-        "sftp",
-    ]
+    args = (
+        [
+            "ssh",
+            f"{bastion_user}@{bastion_host}",
+            "-p",
+            bastion_port,
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-T",
+        ]
+        + ssh_opts
+        + [
+            "--",
+            "--user",
+            remote_user,
+            "--port",
+            remote_port,
+            "--host",
+            host,
+            "--osh",
+            "sftp",
+        ]
+    )
 
     os.execv(
         find_executable("ssh"),
