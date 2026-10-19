@@ -73,7 +73,7 @@ def main():
     if not bastion_host or not bastion_port or not bastion_user:
         hostvar = get_hostvars(host)  # dict
 
-        bastion_port = hostvar.get("bastion_port", os.environ.get("BASTION_PORT", 22))
+        bastion_port = hostvar.get("bastion_port", os.environ.get("BASTION_PORT", "22"))
         bastion_user = hostvar.get(
             "bastion_user", os.environ.get("BASTION_USER", getpass.getuser())
         )
@@ -90,7 +90,7 @@ def main():
     args = (
         [
             "ssh",
-            "{}@{}".format(bastion_user, bastion_host),
+            f"{bastion_user}@{bastion_host}",
             "-p",
             bastion_port,
             "-o",

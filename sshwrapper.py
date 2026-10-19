@@ -73,7 +73,7 @@ def main():
         # manage the case where a bastion var is defined from another var
         # Ex: bastion_host = {{ my_bastion_host }}
         bastion_port = get_var_within(
-            hostvar.get("bastion_port", os.environ.get("BASTION_PORT", 22)), hostvar
+            hostvar.get("bastion_port", os.environ.get("BASTION_PORT", "22")), hostvar
         )
         bastion_user = get_var_within(
             hostvar.get(
@@ -88,10 +88,10 @@ def main():
     for i, e in enumerate(argv):
         if e.startswith("User="):
             remote_user = e.split("=")[-1]
-            argv[i] = "User={}".format(bastion_user)
+            argv[i] = f"User={bastion_user}"
         elif e.startswith("Port="):
             remote_port = e.split("=")[-1]
-            argv[i] = "Port={}".format(bastion_port)
+            argv[i] = f"Port={bastion_port}"
 
     if not remote_user:
         remote_user = bastion_user

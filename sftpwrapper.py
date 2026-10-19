@@ -38,7 +38,7 @@ def main():
             ssh_opts += [e, argv[i + 1]]
             next(iteration)
 
-    sftpcmd = argv.pop()
+    argv.pop()  # sftp command, unused
     host = argv.pop()
 
     # Playbook environment variables are not pushed to the sftp wrapper
@@ -55,7 +55,7 @@ def main():
     # Read from inventory and environment variables
     if not bastion_host or not bastion_port or not bastion_user:
         hostvar = get_hostvars(host)
-        bastion_port = hostvar.get("bastion_port", os.getenv("BASTION_PORT", 22))
+        bastion_port = hostvar.get("bastion_port", os.getenv("BASTION_PORT", "22"))
         bastion_user = hostvar.get(
             "bastion_user", os.getenv("BASTION_USER", getpass.getuser())
         )

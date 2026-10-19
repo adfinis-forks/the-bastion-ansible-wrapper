@@ -16,21 +16,21 @@ BASTION_CONF_FILE = "/tmp/test_bastion_conf_file.yml"
 
 
 def test_manage_conf_file_bastion_host_undefined():
-    bastion_host, bastion_port, bastion_user = manage_conf_file(
+    bastion_host, _, _ = manage_conf_file(
         BASTION_CONF_FILE, None, BASTION_PORT, BASTION_USER
     )
     assert bastion_host == BASTION_HOST
 
 
 def test_manage_conf_file_bastion_port_undefined():
-    bastion_host, bastion_port, bastion_user = manage_conf_file(
+    _, bastion_port, _ = manage_conf_file(
         BASTION_CONF_FILE, BASTION_HOST, None, BASTION_USER
     )
     assert bastion_port == BASTION_PORT
 
 
 def test_manage_conf_file_bastion_user_undefined():
-    bastion_host, bastion_port, bastion_user = manage_conf_file(
+    _, _, bastion_user = manage_conf_file(
         BASTION_CONF_FILE, BASTION_HOST, BASTION_PORT, None
     )
     assert bastion_user == BASTION_USER
@@ -138,6 +138,7 @@ def test_get_bastion_vars_not_full():
 # --- SSH certificate renewal -------------------------------------------------
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -176,21 +177,21 @@ def keypair(tmp_path):
 
 
 def test_cert_expires_within_valid(keypair, tmp_path):
-    key, sign = keypair
+    _, sign = keypair
     cert = str(tmp_path / "c")
     sign("+60m", cert)
     assert not cert_expires_within(cert, 300)
 
 
 def test_cert_expires_within_soon(keypair, tmp_path):
-    key, sign = keypair
+    _, sign = keypair
     cert = str(tmp_path / "c")
     sign("+2m", cert)
     assert cert_expires_within(cert, 300)
 
 
 def test_cert_expires_within_expired(keypair, tmp_path):
-    key, sign = keypair
+    _, sign = keypair
     cert = str(tmp_path / "c")
     sign("-2h:-1h", cert)
     assert cert_expires_within(cert, 300)
@@ -234,9 +235,9 @@ def fake_bao(tmp_path, monkeypatch):
     script.parent.mkdir()
     script.write_text(
         "#!/bin/sh\n"
-        'echo "$* ADDR=$BAO_ADDR TOKEN=$BAO_TOKEN" >> {}\n'
+        f'echo "$* ADDR=$BAO_ADDR TOKEN=$BAO_TOKEN" >> {log}\n'
         '[ -n "$FAKE_BAO_FAIL" ] && exit 1\n'
-        "echo signed-key-content\n".format(log)
+        "echo signed-key-content\n"
     )
     script.chmod(0o755)
     monkeypatch.setenv("PATH", str(script.parent) + os.pathsep + os.environ["PATH"])
@@ -256,11 +257,9 @@ def test_ensure_cert_signs_and_returns_ssh_args(keypair, fake_bao, tmp_path):
     args = ensure_cert(cfg, "bastion1", "alice")
     cert = str(key) + "-alice@bastion1-cert.pub"
     assert args == ["-i", str(key), "-o", "CertificateFile=" + cert]
-    assert open(cert).read().strip() == "signed-key-content"
+    assert Path(cert).read_text().strip() == "signed-key-content"
     assert fake_bao.read_text().strip() == (
-        "write -field=signed_key ssh/sign/role public_key=@{}.pub ttl=30m ADDR=http://bao TOKEN=s.token".format(
-            key
-        )
+        f"write -field=signed_key ssh/sign/role public_key=@{key}.pub ttl=30m ADDR=http://bao TOKEN=s.token"
     )
 
 
@@ -268,7 +267,7 @@ def test_ensure_cert_keeps_valid_cert(keypair, fake_bao):
     key, sign = keypair
     cert = str(key) + "-alice@bastion1-cert.pub"
     sign("+60m", cert)
-    before = open(cert).read()
+    before = Path(cert).read_text()
     ensure_cert(
         {
             "bastion_cert_public_key": str(key) + ".pub",
@@ -278,11 +277,12 @@ def test_ensure_cert_keeps_valid_cert(keypair, fake_bao):
         "bastion1",
         "alice",
     )
-    assert open(cert).read() == before
+    assert Path(cert).read_text() == before
     assert not fake_bao.exists()
 
 
-def test_ensure_cert_bao_failure_is_not_fatal(keypair, fake_bao, monkeypatch):
+@pytest.mark.usefixtures("fake_bao")
+def test_ensure_cert_bao_failure_is_not_fatal(keypair, monkeypatch):
     key, _ = keypair
     monkeypatch.setenv("FAKE_BAO_FAIL", "1")
     args = ensure_cert(

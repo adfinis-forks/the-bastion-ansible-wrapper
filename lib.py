@@ -1,8 +1,10 @@
+import contextlib
 import fcntl
 import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -10,25 +12,20 @@ from datetime import datetime
 
 from yaml import YAMLError, safe_load
 
+logger = logging.getLogger(__name__)
 
-def find_executable(executable, path=None):
+
+def find_executable(executable):
     """Find the absolute path of an executable
 
     :return: path
     :rtype: str
+    :raises FileNotFoundError: if the executable is not on PATH
     """
-    _, ext = os.path.splitext(executable)
-
-    if os.path.isfile(executable):
-        return executable
-
-    if path is None:
-        path = os.environ.get("PATH", os.defpath)
-
-    for p in path.split(os.pathsep):
-        f = os.path.join(p, executable)
-        if os.path.isfile(f):
-            return f
+    path = shutil.which(executable)
+    if not path:
+        raise FileNotFoundError(f"Failed to identify path of {executable}")
+    return path
 
 
 def get_inventory():
@@ -38,13 +35,11 @@ def get_inventory():
     :rtype: dict
     """
     inventory_cmd = find_executable("ansible-inventory")
-    if not inventory_cmd:
-        raise Exception("Failed to identify path of ansible-inventory")
 
     cache_file = os.environ.get("BASTION_ANSIBLE_INV_CACHE_FILE")
-    cache_timeout = int(os.environ.get("BASTION_ANSIBLE_INV_CACHE_TIMEOUT", 60))
+    cache_timeout = int(os.environ.get("BASTION_ANSIBLE_INV_CACHE_TIMEOUT", "60"))
     inventory_options = os.environ.get("BASTION_ANSIBLE_INV_OPTIONS", "")
-    command = "{} {} --list".format(inventory_cmd, inventory_options)
+    command = f"{inventory_cmd} {inventory_options} --list"
 
     if not cache_file:
         return get_inv_from_command(command)
@@ -82,24 +77,22 @@ def get_inventory_from_cache(cache_file, cache_timeout):
     """
     try:
         # Load JSON from cache file
-        with open(cache_file, "r") as fd:
+        with open(cache_file) as fd:
             cache = json.load(fd)
-    except IOError:
+    except OSError:
         # File does not exist or path is incorrect
         return None
-    except:
-        # Invalid JSON or any other error
-        pass
-    else:
-        # Check cache expiry
-        if cache.get("updated_at", 0) >= int(time.time()) - cache_timeout:
-            return cache
+    except ValueError:
+        # Invalid JSON, treat as expired
+        cache = None
 
-    # Cache expired or any other error
-    try:
+    # Check cache expiry
+    if cache and cache.get("updated_at", 0) >= int(time.time()) - cache_timeout:
+        return cache
+
+    # Cache expired or invalid
+    with contextlib.suppress(OSError):
         os.remove(cache_file)
-    except:
-        pass
 
     return None
 
@@ -152,10 +145,10 @@ def load_conf_file(conf_file):
     if not os.path.exists(conf_file):
         return {}
     try:
-        with open(conf_file, "r") as f:
+        with open(conf_file) as f:
             return safe_load(f) or {}
-    except (YAMLError, IOError) as e:
-        print("Error loading yaml file: {}".format(e))
+    except (YAMLError, OSError) as e:
+        print(f"Error loading yaml file: {e}")
         return {}
 
 
@@ -211,15 +204,15 @@ def get_inv_from_command(command):
         inventory = json.loads(output)
         return inventory
     else:
-        logging.error(error)
-        raise Exception("failed to get inventory")
+        logger.error(error)
+        raise RuntimeError("failed to get inventory")
 
 
 def awx_get_inventory_file():
     # awx execution environment run dir, where the project and inventory are copied
     default_run_dir = "/runner"
     run_dir = os.environ.get("AWX_RUN_DIR", default_run_dir)
-    return "{}/inventory/hosts".format(run_dir)
+    return f"{run_dir}/inventory/hosts"
 
 
 def awx_get_vars(host_ip, inventory_file):
@@ -230,6 +223,7 @@ def awx_get_vars(host_ip, inventory_file):
     # We are looking for the host which "ansible_host" has the same ip, then try to fetch the required vars from
     # its host_vars
     host = None
+    host_vars = {}
     for k, v in inv.get("_meta", {}).get("hostvars", {}).items():
         if v.get("ansible_host") == host_ip:
             host = k
@@ -252,7 +246,7 @@ def awx_get_vars(host_ip, inventory_file):
     # if some bastion vars are missing, maybe they are defined as group_vars.
     # We do an inventory lookup to get them.
     # With AWX no need to list the whole inventory, we already know the host
-    command = "ansible-inventory -i {} --host {}".format(inventory_file, host)
+    command = f"ansible-inventory -i {inventory_file} --host {host}"
     return get_inv_from_command(command)
 
 
@@ -316,6 +310,7 @@ def cert_expires_within(cert, seconds):
         ["ssh-keygen", "-L", "-f", cert],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        check=False,
     )
     if p.returncode:
         return True
@@ -345,11 +340,11 @@ def sign_cert(cfg, public_key, cert):
             "ttl=" + cfg["bastion_cert_ttl"],
         ],
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
+        check=False,
     )
     if p.returncode:
-        raise Exception("bao write failed: {}".format(p.stderr.decode().strip()))
+        raise RuntimeError(f"bao write failed: {p.stderr.decode().strip()}")
     tmp = cert + ".tmp"
     with open(tmp, "wb") as f:
         f.write(p.stdout)
@@ -364,8 +359,8 @@ def ensure_cert(cfg, bastion_host, bastion_user):
     bastion accounts.
     """
     public_key = os.path.expanduser(cfg["bastion_cert_public_key"])
-    key = public_key[:-4] if public_key.endswith(".pub") else public_key
-    cert = "{}-{}@{}-cert.pub".format(key, bastion_user, bastion_host)
+    key = public_key.removesuffix(".pub")
+    cert = f"{key}-{bastion_user}@{bastion_host}-cert.pub"
 
     if cert_expires_within(cert, CERT_RENEW_MARGIN):
         # ansible forks several wrappers at once: only one of them should sign
@@ -374,10 +369,10 @@ def ensure_cert(cfg, bastion_host, bastion_user):
             try:
                 if cert_expires_within(cert, CERT_RENEW_MARGIN):
                     sign_cert(cfg, public_key, cert)
-            except Exception as e:
+            except Exception as e:  # noqa: BLE001
                 # not fatal: let ssh fail with the real authentication error
                 print(
-                    "bastion wrapper: certificate renewal failed: {}".format(e),
+                    f"bastion wrapper: certificate renewal failed: {e}",
                     file=sys.stderr,
                 )
             finally:
