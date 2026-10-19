@@ -2,3 +2,10 @@
 bastion_host: "my_great_bastion"
 bastion_port: 22
 bastion_user: "my_bastion_user"
+
+# optional: short lived ssh certificate signed by OpenBao
+# bastion_cert_public_key: "~/.ssh/id_ed25519.pub"
+# bastion_bao_sign_path: "ssh-bastion/sign/bastion-ca"
+# bastion_bao_addr: "https://bao.example.org"
+# bastion_bao_token_file: "~/.bao-token-bastion"
+# bastion_cert_ttl: "15m"

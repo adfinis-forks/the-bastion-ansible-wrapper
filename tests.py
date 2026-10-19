@@ -133,3 +133,166 @@ def test_get_bastion_vars_not_full():
     host_vars = {"bastion_port": BASTION_PORT, "bastion_user": BASTION_USER}
     bastion_vars = get_bastion_vars(host_vars)
     assert not bastion_vars["bastion_host"]
+
+
+# --- SSH certificate renewal -------------------------------------------------
+
+import subprocess
+
+import pytest
+
+from lib import cert_expires_within, ensure_cert, get_cert_config
+
+
+@pytest.fixture
+def keypair(tmp_path):
+    """A user key and a CA, plus a helper to sign the key with a given validity."""
+    ca = tmp_path / "ca"
+    key = tmp_path / "id_test"
+    for k in (ca, key):
+        subprocess.run(
+            ["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-f", str(k)], check=True
+        )
+
+    def sign(validity, cert):
+        subprocess.run(
+            [
+                "ssh-keygen",
+                "-q",
+                "-s",
+                str(ca),
+                "-I",
+                "t",
+                "-V",
+                validity,
+                str(key) + ".pub",
+            ],
+            check=True,
+            stderr=subprocess.DEVNULL,
+        )
+        os.replace(str(key) + "-cert.pub", cert)
+
+    return key, sign
+
+
+def test_cert_expires_within_valid(keypair, tmp_path):
+    key, sign = keypair
+    cert = str(tmp_path / "c")
+    sign("+60m", cert)
+    assert not cert_expires_within(cert, 300)
+
+
+def test_cert_expires_within_soon(keypair, tmp_path):
+    key, sign = keypair
+    cert = str(tmp_path / "c")
+    sign("+2m", cert)
+    assert cert_expires_within(cert, 300)
+
+
+def test_cert_expires_within_expired(keypair, tmp_path):
+    key, sign = keypair
+    cert = str(tmp_path / "c")
+    sign("-2h:-1h", cert)
+    assert cert_expires_within(cert, 300)
+
+
+def test_cert_expires_within_missing(tmp_path):
+    assert cert_expires_within(str(tmp_path / "nope"), 300)
+
+
+def test_get_cert_config_precedence(tmp_path, monkeypatch):
+    conf = tmp_path / "conf.yml"
+    conf.write_text(
+        "bastion_cert_public_key: conf.pub\nbastion_bao_sign_path: conf/sign\n"
+    )
+    monkeypatch.setenv("BASTION_BAO_SIGN_PATH", "env/sign")
+    monkeypatch.setenv("BASTION_BAO_ADDR", "http://env")
+    monkeypatch.setenv("BASTION_BAO_TOKEN_FILE", "env.token")
+    hostvar = {
+        "bastion_bao_addr": "{{ my_bao }}",
+        "my_bao": "http://inv",
+        "bastion_bao_token_file": "inv.token",
+    }
+    cmd = "BASTION_CERT_PUBLIC_KEY=cmd.pub /usr/bin/python3 && sleep 0"
+    cfg = get_cert_config(cmd, str(conf), hostvar)
+    assert cfg["bastion_cert_public_key"] == "cmd.pub"  # playbook env
+    assert cfg["bastion_bao_sign_path"] == "conf/sign"  # config file
+    assert cfg["bastion_bao_addr"] == "http://inv"  # inventory, jinja resolved
+    assert cfg["bastion_bao_token_file"] == "inv.token"  # inventory over OS env
+    assert cfg["bastion_cert_ttl"] == "15m"  # default
+
+
+def test_get_cert_config_unset(tmp_path):
+    assert get_cert_config("", str(tmp_path / "nope.yml"), {}) == {}
+
+
+@pytest.fixture
+def fake_bao(tmp_path, monkeypatch):
+    """A `bao` on PATH that records its args/env and prints a canned signed key."""
+    log = tmp_path / "bao.log"
+    script = tmp_path / "bin" / "bao"
+    script.parent.mkdir()
+    script.write_text(
+        "#!/bin/sh\n"
+        'echo "$* ADDR=$BAO_ADDR TOKEN=$BAO_TOKEN" >> {}\n'
+        '[ -n "$FAKE_BAO_FAIL" ] && exit 1\n'
+        "echo signed-key-content\n".format(log)
+    )
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", str(script.parent) + os.pathsep + os.environ["PATH"])
+    return log
+
+
+def test_ensure_cert_signs_and_returns_ssh_args(keypair, fake_bao, tmp_path):
+    key, _ = keypair
+    (tmp_path / "t").write_text("s.token\n")
+    cfg = {
+        "bastion_cert_public_key": str(key) + ".pub",
+        "bastion_bao_sign_path": "ssh/sign/role",
+        "bastion_bao_addr": "http://bao",
+        "bastion_bao_token_file": str(tmp_path / "t"),
+        "bastion_cert_ttl": "30m",
+    }
+    args = ensure_cert(cfg, "bastion1", "alice")
+    cert = str(key) + "-alice@bastion1-cert.pub"
+    assert args == ["-i", str(key), "-o", "CertificateFile=" + cert]
+    assert open(cert).read().strip() == "signed-key-content"
+    assert fake_bao.read_text().strip() == (
+        "write -field=signed_key ssh/sign/role public_key=@{}.pub ttl=30m ADDR=http://bao TOKEN=s.token".format(
+            key
+        )
+    )
+
+
+def test_ensure_cert_keeps_valid_cert(keypair, fake_bao):
+    key, sign = keypair
+    cert = str(key) + "-alice@bastion1-cert.pub"
+    sign("+60m", cert)
+    before = open(cert).read()
+    ensure_cert(
+        {
+            "bastion_cert_public_key": str(key) + ".pub",
+            "bastion_bao_sign_path": "p",
+            "bastion_cert_ttl": "60m",
+        },
+        "bastion1",
+        "alice",
+    )
+    assert open(cert).read() == before
+    assert not fake_bao.exists()
+
+
+def test_ensure_cert_bao_failure_is_not_fatal(keypair, fake_bao, monkeypatch):
+    key, _ = keypair
+    monkeypatch.setenv("FAKE_BAO_FAIL", "1")
+    args = ensure_cert(
+        {
+            "bastion_cert_public_key": str(key) + ".pub",
+            "bastion_bao_sign_path": "p",
+            "bastion_cert_ttl": "60m",
+        },
+        "b",
+        "alice",
+    )
+    assert args[0] == "-i"
+    assert not os.path.exists(str(key) + "-alice@b-cert.pub")
