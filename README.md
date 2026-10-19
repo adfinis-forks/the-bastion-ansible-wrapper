@@ -123,7 +123,8 @@ authentication errors on every new SSH connection.
 
 The wrapper can renew the certificate itself: before each connection it checks
 the certificate with `ssh-keygen -L` and, if it is missing or expires within
-5 minutes, runs the equivalent of
+5 minutes, signs it through the OpenBao HTTP API (using
+[hvac](https://github.com/hvac/hvac), `pip install hvac`), the equivalent of
 
 ```bash
 bao write -field=signed_key <bastion_bao_sign_path> public_key=@<bastion_cert_public_key> ttl=<bastion_cert_ttl>
@@ -144,8 +145,8 @@ and `-o CertificateFile=<cert>` to ssh.
 |---|---|
 | `bastion_cert_public_key` | public key to sign, e.g. `~/.ssh/id_ed25519.pub` (enables the feature) |
 | `bastion_bao_sign_path` | OpenBao path, e.g. `ssh-bastion/sign/bastion-ca` |
-| `bastion_bao_addr` | optional, OpenBao address (defaults to bao's own `BAO_ADDR`) |
-| `bastion_bao_token_file` | optional, file containing the token to use for this bastion (defaults to bao's own token lookup) |
+| `bastion_bao_addr` | optional, OpenBao address (defaults to `BAO_ADDR`, then `VAULT_ADDR`) |
+| `bastion_bao_token_file` | optional, file containing the token to use for this bastion (defaults to `BAO_TOKEN`, `~/.bao-token`, then `VAULT_TOKEN` / `~/.vault-token`) |
 | `bastion_cert_ttl` | optional, certificate TTL requested from OpenBao (default `15m`) |
 
 They are resolved with the same priority as the other bastion vars (playbook

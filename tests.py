@@ -142,6 +142,8 @@ from pathlib import Path
 
 import pytest
 
+import lib
+
 from lib import cert_expires_within, ensure_cert, get_cert_config
 
 
@@ -228,20 +230,23 @@ def test_get_cert_config_unset(tmp_path):
 
 
 @pytest.fixture
-def fake_bao(tmp_path, monkeypatch):
-    """A `bao` on PATH that records its args/env and prints a canned signed key."""
-    log = tmp_path / "bao.log"
-    script = tmp_path / "bin" / "bao"
-    script.parent.mkdir()
-    script.write_text(
-        "#!/bin/sh\n"
-        f'echo "$* ADDR=$BAO_ADDR TOKEN=$BAO_TOKEN" >> {log}\n'
-        '[ -n "$FAKE_BAO_FAIL" ] && exit 1\n'
-        "echo signed-key-content\n"
-    )
-    script.chmod(0o755)
-    monkeypatch.setenv("PATH", str(script.parent) + os.pathsep + os.environ["PATH"])
-    return log
+def fake_bao(monkeypatch):
+    """Replace hvac.Client with a stub that records calls and returns a signed key"""
+    calls = []
+
+    class Client:
+        def __init__(self, url=None, token=None):
+            calls.append({"url": url, "token": token})
+
+        def write_data(self, path, data=None):
+            calls[-1].update(path=path, data=data)
+            if os.environ.get("FAKE_BAO_FAIL"):
+                raise RuntimeError("permission denied")
+            return {"data": {"signed_key": "signed-key-content\n"}}
+
+    monkeypatch.setattr(lib.hvac, "Client", Client)
+    monkeypatch.delenv("BAO_TOKEN", raising=False)
+    return calls
 
 
 def test_ensure_cert_signs_and_returns_ssh_args(keypair, fake_bao, tmp_path):
@@ -258,9 +263,14 @@ def test_ensure_cert_signs_and_returns_ssh_args(keypair, fake_bao, tmp_path):
     cert = str(key) + "-alice@bastion1-cert.pub"
     assert args == ["-i", str(key), "-o", "CertificateFile=" + cert]
     assert Path(cert).read_text().strip() == "signed-key-content"
-    assert fake_bao.read_text().strip() == (
-        f"write -field=signed_key ssh/sign/role public_key=@{key}.pub ttl=30m ADDR=http://bao TOKEN=s.token"
-    )
+    assert fake_bao == [
+        {
+            "url": "http://bao",
+            "token": "s.token",
+            "path": "ssh/sign/role",
+            "data": {"public_key": Path(str(key) + ".pub").read_text(), "ttl": "30m"},
+        }
+    ]
 
 
 def test_ensure_cert_keeps_valid_cert(keypair, fake_bao):
@@ -278,7 +288,7 @@ def test_ensure_cert_keeps_valid_cert(keypair, fake_bao):
         "alice",
     )
     assert Path(cert).read_text() == before
-    assert not fake_bao.exists()
+    assert fake_bao == []
 
 
 @pytest.mark.usefixtures("fake_bao")

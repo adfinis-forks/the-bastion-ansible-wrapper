@@ -10,6 +10,7 @@ import sys
 import time
 from datetime import datetime
 
+import hvac
 from yaml import YAMLError, safe_load
 
 logger = logging.getLogger(__name__)
@@ -322,32 +323,28 @@ def cert_expires_within(cert, seconds):
     return expires < time.time() + seconds
 
 
+def bao_client(cfg):
+    """hvac client for the OpenBao server, honouring the bao CLI's BAO_* env"""
+    url = cfg.get("bastion_bao_addr") or os.environ.get("BAO_ADDR")
+    token = os.environ.get("BAO_TOKEN")
+    token_file = cfg.get("bastion_bao_token_file") or "~/.bao-token"
+    if cfg.get("bastion_bao_token_file") or (
+        not token and os.path.exists(os.path.expanduser(token_file))
+    ):
+        with open(os.path.expanduser(token_file)) as f:
+            token = f.read().strip()
+    # hvac itself falls back to VAULT_ADDR / VAULT_TOKEN / ~/.vault-token
+    return hvac.Client(url=url, token=token)
+
+
 def sign_cert(cfg, public_key, cert):
     """Sign public_key with OpenBao and write the certificate to `cert`"""
-    env = dict(os.environ)
-    if cfg.get("bastion_bao_addr"):
-        env["BAO_ADDR"] = cfg["bastion_bao_addr"]
-    if cfg.get("bastion_bao_token_file"):
-        with open(os.path.expanduser(cfg["bastion_bao_token_file"])) as f:
-            env["BAO_TOKEN"] = f.read().strip()
-    p = subprocess.run(
-        [
-            "bao",
-            "write",
-            "-field=signed_key",
-            cfg["bastion_bao_sign_path"],
-            "public_key=@" + public_key,
-            "ttl=" + cfg["bastion_cert_ttl"],
-        ],
-        env=env,
-        capture_output=True,
-        check=False,
-    )
-    if p.returncode:
-        raise RuntimeError(f"bao write failed: {p.stderr.decode().strip()}")
+    with open(public_key) as f:
+        data = {"public_key": f.read(), "ttl": cfg["bastion_cert_ttl"]}
+    resp = bao_client(cfg).write_data(cfg["bastion_bao_sign_path"], data=data)
     tmp = cert + ".tmp"
-    with open(tmp, "wb") as f:
-        f.write(p.stdout)
+    with open(tmp, "w") as f:
+        f.write(resp["data"]["signed_key"])
     os.replace(tmp, cert)
 
 
