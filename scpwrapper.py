@@ -4,7 +4,13 @@ import getpass
 import os
 import sys
 
-from lib import find_executable, get_hostvars, manage_conf_file
+from lib import (
+    ensure_cert,
+    find_executable,
+    get_cert_config,
+    get_hostvars,
+    manage_conf_file,
+)
 
 
 def main():
@@ -16,6 +22,7 @@ def main():
     remote_user = None
     remote_port = 22
     default_configuration_file = "/etc/ovh/bastion/config.yml"
+    hostvar = {}
 
     iteration = enumerate(argv)
     sshcmdline = []
@@ -71,6 +78,13 @@ def main():
             "bastion_user", os.environ.get("BASTION_USER", getpass.getuser())
         )
         bastion_host = hostvar.get("bastion_host", os.environ.get("BASTION_HOST"))
+
+    # short lived ssh certificate signed by OpenBao, renewed when about to expire
+    cert_cfg = get_cert_config(
+        scpcmd, os.getenv("BASTION_CONF_FILE", default_configuration_file), hostvar
+    )
+    if cert_cfg:
+        sshcmdline += ensure_cert(cert_cfg, bastion_host, bastion_user)
 
     # syscall exec
     args = (

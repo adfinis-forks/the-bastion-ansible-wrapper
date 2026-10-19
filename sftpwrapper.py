@@ -4,7 +4,13 @@ import getpass
 import os
 import sys
 
-from lib import find_executable, get_hostvars, manage_conf_file
+from lib import (
+    ensure_cert,
+    find_executable,
+    get_cert_config,
+    get_hostvars,
+    manage_conf_file,
+)
 
 
 def main():
@@ -16,6 +22,7 @@ def main():
     remote_user = None
     remote_port = 22
     default_configuration_file = "/etc/ovh/bastion/config.yml"
+    hostvar = {}
 
     ssh_opts = []
 
@@ -47,15 +54,22 @@ def main():
 
     # Read from inventory and environment variables
     if not bastion_host or not bastion_port or not bastion_user:
-        inventory = get_hostvars(host)
-        bastion_port = inventory.get("bastion_port", os.getenv("BASTION_PORT", 22))
-        bastion_user = inventory.get(
+        hostvar = get_hostvars(host)
+        bastion_port = hostvar.get("bastion_port", os.getenv("BASTION_PORT", 22))
+        bastion_user = hostvar.get(
             "bastion_user", os.getenv("BASTION_USER", getpass.getuser())
         )
-        bastion_host = inventory.get("bastion_host", os.getenv("BASTION_HOST"))
+        bastion_host = hostvar.get("bastion_host", os.getenv("BASTION_HOST"))
 
     if not remote_user:
         remote_user = bastion_user
+
+    # short lived ssh certificate signed by OpenBao, renewed when about to expire
+    cert_cfg = get_cert_config(
+        "", os.getenv("BASTION_CONF_FILE", default_configuration_file), hostvar
+    )
+    if cert_cfg:
+        ssh_opts += ensure_cert(cert_cfg, bastion_host, bastion_user)
 
     args = (
         [

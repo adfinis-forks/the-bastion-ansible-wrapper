@@ -7,7 +7,9 @@ import sys
 from lib import (
     awx_get_inventory_file,
     awx_get_vars,
+    ensure_cert,
     find_executable,
+    get_cert_config,
     get_hostvars,
     get_var_within,
     manage_conf_file,
@@ -23,6 +25,7 @@ def main():
     remote_user = None
     remote_port = 22
     default_configuration_file = "/etc/ovh/bastion/config.yml"
+    hostvar = {}
 
     cmd = argv.pop()
     host = argv.pop()
@@ -92,6 +95,13 @@ def main():
 
     if not remote_user:
         remote_user = bastion_user
+
+    # short lived ssh certificate signed by OpenBao, renewed when about to expire
+    cert_cfg = get_cert_config(
+        cmd, os.environ.get("BASTION_CONF_FILE", default_configuration_file), hostvar
+    )
+    if cert_cfg:
+        argv += ensure_cert(cert_cfg, bastion_host, bastion_user)
 
     # syscall exec
     args = (

@@ -2,8 +2,11 @@ import fcntl
 import json
 import logging
 import os
+import re
 import subprocess
+import sys
 import time
+from datetime import datetime
 
 from yaml import YAMLError, safe_load
 
@@ -133,22 +136,27 @@ def manage_conf_file(conf_file, bastion_host, bastion_port, bastion_user):
 
     """
 
-    if os.path.exists(conf_file):
-        try:
-            with open(conf_file, "r") as f:
-                yaml_conf = safe_load(f)
-
-                if not bastion_host:
-                    bastion_host = yaml_conf.get("bastion_host")
-                if not bastion_port:
-                    bastion_port = yaml_conf.get("bastion_port")
-                if not bastion_user:
-                    bastion_user = yaml_conf.get("bastion_user")
-
-        except (YAMLError, IOError) as e:
-            print("Error loading yaml file: {}".format(e))
+    yaml_conf = load_conf_file(conf_file)
+    if not bastion_host:
+        bastion_host = yaml_conf.get("bastion_host")
+    if not bastion_port:
+        bastion_port = yaml_conf.get("bastion_port")
+    if not bastion_user:
+        bastion_user = yaml_conf.get("bastion_user")
 
     return bastion_host, bastion_port, bastion_user
+
+
+def load_conf_file(conf_file):
+    """Load the yaml config file, {} if missing or invalid"""
+    if not os.path.exists(conf_file):
+        return {}
+    try:
+        with open(conf_file, "r") as f:
+            return safe_load(f) or {}
+    except (YAMLError, IOError) as e:
+        print("Error loading yaml file: {}".format(e))
+        return {}
 
 
 def get_var_within(my_value, hostvar, check_list=None):
@@ -257,3 +265,122 @@ def get_bastion_vars(host_vars):
         "bastion_port": bastion_port,
         "bastion_user": bastion_user,
     }
+
+
+# --- SSH certificate renewal (OpenBao) ---------------------------------------
+
+CERT_VARS = (
+    "bastion_cert_public_key",
+    "bastion_bao_sign_path",
+    "bastion_bao_addr",
+    "bastion_bao_token_file",
+    "bastion_cert_ttl",
+)
+CERT_DEFAULTS = {"bastion_cert_ttl": "15m"}
+# renew the certificate when it expires within this many seconds
+CERT_RENEW_MARGIN = 300
+
+
+def get_cert_config(cmd, conf_file, hostvar):
+    """Resolve the bastion_cert_* / bastion_bao_* vars.
+
+    Same precedence as the bastion vars: playbook environment (prefix of the
+    ssh command), config file, inventory hostvars, OS environment.
+    Returns {} when no public key is configured (feature disabled).
+    """
+    cmd_env = dict(
+        tok.split("=", 1)
+        for tok in cmd.split(" ")
+        if tok.upper().startswith("BASTION_") and "=" in tok
+    )
+    conf = load_conf_file(conf_file)
+    cfg = {}
+    for name in CERT_VARS:
+        value = (
+            cmd_env.get(name.upper())
+            or conf.get(name)
+            or get_var_within(hostvar.get(name), hostvar)
+            or os.environ.get(name.upper())
+            or CERT_DEFAULTS.get(name)
+        )
+        if value:
+            cfg[name] = value
+    if "bastion_cert_public_key" not in cfg:
+        return {}
+    return cfg
+
+
+def cert_expires_within(cert, seconds):
+    """True if the certificate is missing, unreadable or expires within `seconds`"""
+    p = subprocess.run(
+        ["ssh-keygen", "-L", "-f", cert],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if p.returncode:
+        return True
+    m = re.search(r"Valid: .*(?:to|before) (\S+)", p.stdout.decode())
+    if not m:
+        return False  # "Valid: forever" or no end date
+    # ssh-keygen prints local time
+    expires = datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").timestamp()
+    return expires < time.time() + seconds
+
+
+def sign_cert(cfg, public_key, cert):
+    """Sign public_key with OpenBao and write the certificate to `cert`"""
+    env = dict(os.environ)
+    if cfg.get("bastion_bao_addr"):
+        env["BAO_ADDR"] = cfg["bastion_bao_addr"]
+    if cfg.get("bastion_bao_token_file"):
+        with open(os.path.expanduser(cfg["bastion_bao_token_file"])) as f:
+            env["BAO_TOKEN"] = f.read().strip()
+    p = subprocess.run(
+        [
+            "bao",
+            "write",
+            "-field=signed_key",
+            cfg["bastion_bao_sign_path"],
+            "public_key=@" + public_key,
+            "ttl=" + cfg["bastion_cert_ttl"],
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if p.returncode:
+        raise Exception("bao write failed: {}".format(p.stderr.decode().strip()))
+    tmp = cert + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(p.stdout)
+    os.replace(tmp, cert)
+
+
+def ensure_cert(cfg, bastion_host, bastion_user):
+    """Renew the bastion certificate if needed, return the ssh args to use it.
+
+    The certificate is stored per bastion user and host next to the private
+    key, so the same key can be signed by different CAs / for different
+    bastion accounts.
+    """
+    public_key = os.path.expanduser(cfg["bastion_cert_public_key"])
+    key = public_key[:-4] if public_key.endswith(".pub") else public_key
+    cert = "{}-{}@{}-cert.pub".format(key, bastion_user, bastion_host)
+
+    if cert_expires_within(cert, CERT_RENEW_MARGIN):
+        # ansible forks several wrappers at once: only one of them should sign
+        with open(cert + ".lock", "w") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                if cert_expires_within(cert, CERT_RENEW_MARGIN):
+                    sign_cert(cfg, public_key, cert)
+            except Exception as e:
+                # not fatal: let ssh fail with the real authentication error
+                print(
+                    "bastion wrapper: certificate renewal failed: {}".format(e),
+                    file=sys.stderr,
+                )
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+
+    return ["-i", key, "-o", "CertificateFile=" + cert]

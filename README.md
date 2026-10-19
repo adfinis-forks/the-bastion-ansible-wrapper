@@ -114,6 +114,56 @@ Source of variables are read in the following order:
 * Ansible inventory
 * operating system environment variables
 
+## Short lived SSH certificates signed by OpenBao
+
+When the bastion authenticates users with SSH certificates signed by an
+[OpenBao](https://openbao.org/) SSH secrets engine, the certificate TTL is
+usually short. Plays running longer than that would fail with
+authentication errors on every new SSH connection.
+
+The wrapper can renew the certificate itself: before each connection it checks
+the certificate with `ssh-keygen -L` and, if it is missing or expires within
+5 minutes, runs the equivalent of
+
+```bash
+bao write -field=signed_key <bastion_bao_sign_path> public_key=@<bastion_cert_public_key> ttl=<bastion_cert_ttl>
+```
+
+Only one of the wrappers forked by Ansible signs at a time (lock file next to
+the certificate). If the renewal fails, the error is printed and ssh is run
+anyway, so the real authentication error shows up in the Ansible output.
+
+The feature is enabled by setting `bastion_cert_public_key`. The private key
+is derived by stripping `.pub`, and the certificate is written per bastion
+account to `<private_key>-<bastion_user>@<bastion_host>-cert.pub`, so one key
+can be signed by different CAs or for different users on the same bastion.
+The wrapper passes `-i <private_key>`
+and `-o CertificateFile=<cert>` to ssh.
+
+| Variable | Description |
+|---|---|
+| `bastion_cert_public_key` | public key to sign, e.g. `~/.ssh/id_ed25519.pub` (enables the feature) |
+| `bastion_bao_sign_path` | OpenBao path, e.g. `ssh-bastion/sign/bastion-ca` |
+| `bastion_bao_addr` | optional, OpenBao address (defaults to bao's own `BAO_ADDR`) |
+| `bastion_bao_token_file` | optional, file containing the token to use for this bastion (defaults to bao's own token lookup) |
+| `bastion_cert_ttl` | optional, certificate TTL requested from OpenBao (default `15m`) |
+
+They are resolved with the same priority as the other bastion vars (playbook
+`environment` as `BASTION_CERT_PUBLIC_KEY` etc., configuration file, inventory,
+OS environment variables), so they can be set per bastion in `group_vars`:
+
+```yaml
+group_vars/zone_secure.yml:bastion_host: <your-supersecure-bastion>
+group_vars/zone_secure.yml:bastion_user: <your-secure-user>
+group_vars/zone_secure.yml:bastion_cert_public_key: ~/.ssh/id_ed25519.pub
+group_vars/zone_secure.yml:bastion_bao_sign_path: ssh-secure/sign/secure-ca
+group_vars/zone_secure.yml:bastion_bao_token_file: ~/.bao-token-secure
+```
+
+Note: inventory vars are only looked up when the bastion vars are not fully
+defined by the playbook environment or the configuration file. The OpenBao
+token itself must stay valid for the duration of the play.
+
 ## Using multiple inventories sources
 
 The wrapper is going to lookup the ansible inventory to look for the host and its vars.
