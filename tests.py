@@ -306,3 +306,68 @@ def test_ensure_cert_bao_failure_is_not_fatal(keypair, monkeypatch):
     )
     assert args[0] == "-i"
     assert not os.path.exists(str(key) + "-alice@b-cert.pub")
+
+
+# --- SSH connection multiplexing ---------------------------------------------
+
+from lib import control_opts
+
+
+def test_control_opts_replaces_ansible_socket(tmp_path, monkeypatch):
+    monkeypatch.setenv("BASTION_CONTROL_PATH_DIR", str(tmp_path / "cp"))
+    monkeypatch.delenv("BASTION_CONTROL_PERSIST", raising=False)
+    argv = [
+        "-C",
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        "ControlPersist=60s",
+        "-o",
+        'ControlPath="/home/u/.ansible/cp/abc"',
+        "-oControlPath=%h-%p-%r",
+        "-o",
+        "User=root",
+    ]
+    out = control_opts(argv, "web1", 22, "root", "bu", "bastion", 22)
+    assert out[:3] == ["-C", "-o", "User=root"]
+    assert out[3::2] == ["-o"] * 3
+    opts = dict(o.split("=", 1) for o in out[4::2])
+    assert opts["ControlMaster"] == "auto"
+    assert opts["ControlPersist"] == "60s"
+    assert opts["ControlPath"].startswith(str(tmp_path / "cp") + "/bastion-")
+    assert (tmp_path / "cp").is_dir()
+
+
+def test_control_opts_socket_per_host(tmp_path, monkeypatch):
+    monkeypatch.setenv("BASTION_CONTROL_PATH_DIR", str(tmp_path))
+    monkeypatch.setenv("BASTION_CONTROL_PERSIST", "5m")
+
+    def path(*key):
+        return control_opts([], *key)[-1]
+
+    same = path("web1", 22, "root", "bu", "bastion", 22)
+    assert same == path("web1", "22", "root", "bu", "bastion", "22")  # ssh vs sftp
+    assert same != path("web2", 22, "root", "bu", "bastion", 22)
+    assert same != path("web1", 22, "root", "bu", "bastion2", 22)
+    assert "ControlPersist=5m" in control_opts([], "web1", 22, "root", "bu", "b", 22)
+    monkeypatch.setattr(lib, "run_id", lambda: 424242)  # another ansible run
+    assert same != path("web1", 22, "root", "bu", "bastion", 22)
+
+
+def test_run_id_is_top_ansible_ancestor(tmp_path):
+    # ansible-x -> sh -> python: run_id() must return the pid of ansible-x
+    script = tmp_path / "ansible-x"
+    script.write_text(
+        "#!/bin/sh\nsh -c 'python3 -c \"import lib; print(lib.run_id())\"'\n"
+    )
+    script.chmod(0o755)
+    env = {**os.environ, "PYTHONPATH": str(Path(lib.__file__).parent)}
+    p = subprocess.Popen([str(script)], stdout=subprocess.PIPE, env=env)
+    out, _ = p.communicate()
+    assert int(out) == p.pid
+
+
+def test_control_opts_disabled(monkeypatch):
+    monkeypatch.setenv("BASTION_CONTROL_PERSIST", "no")
+    argv = ["-o", "ControlPath=x"]
+    assert control_opts(argv, "h", 22, "u", "bu", "b", 22) is argv

@@ -1,5 +1,6 @@
 import contextlib
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -376,3 +377,78 @@ def ensure_cert(cfg, bastion_host, bastion_user):
                 fcntl.flock(lf, fcntl.LOCK_UN)
 
     return ["-i", key, "-o", "CertificateFile=" + cert]
+
+
+# --- SSH connection multiplexing ---------------------------------------------
+
+
+def run_id():
+    """Identify the Ansible run we are part of, so simultaneous runs against
+    the same host never share a control socket.
+
+    Returns the pid of the top-most `ansible*` process among our ancestors
+    (ansible-playbook, ansible, ansible-runner...): its workers are forked per
+    task and setsid() themselves, so neither our parent nor our process group
+    is stable. Falls back to the process group where /proc is not available.
+    """
+    pid, found = os.getppid(), os.getpgid(0)
+    try:
+        while pid > 1:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                argv = f.read().split(b"\0")
+            # "ansible-playbook ..." or "python /usr/bin/ansible-playbook ..."
+            if any(os.path.basename(a).startswith(b"ansible") for a in argv[:2]):
+                found = pid
+            with open(f"/proc/{pid}/stat") as f:
+                pid = int(f.read().rsplit(")", 1)[1].split()[1])  # ppid
+    except OSError:
+        pass
+    return found
+
+
+def control_opts(
+    argv, host, remote_port, remote_user, bastion_user, bastion_host, bastion_port
+):
+    """Replace the ControlMaster/ControlPersist/ControlPath options with ours.
+
+    The bastion runs sshd with `MaxSessions 1`: a multiplexed connection can
+    carry a single session at a time. Ansible runs the tasks of a host
+    sequentially, so one socket per (target host, bastion account) is safe and
+    lets ssh, sftp and scp of one Ansible run reuse the same bastion connection.
+    Whatever Ansible
+    or ssh_config computed (e.g. `%h-%p-%r`, which would resolve to the bastion
+    and be shared by every host) is dropped.
+
+    Disabled with BASTION_CONTROL_PERSIST=no (argv is returned untouched).
+    """
+    persist = os.environ.get("BASTION_CONTROL_PERSIST", "60s")
+    if persist == "no":
+        return argv
+
+    out = []
+    skip = False
+    for i, a in enumerate(argv):
+        if skip:
+            skip = False
+        elif a == "-o" and i + 1 < len(argv) and argv[i + 1].startswith("Control"):
+            skip = True
+        elif not a.startswith("-oControl"):
+            out.append(a)
+
+    cp_dir = os.path.expanduser(
+        os.environ.get("BASTION_CONTROL_PATH_DIR", "~/.ansible/cp")
+    )
+    os.makedirs(cp_dir, 0o700, exist_ok=True)
+    key = (
+        f"{remote_user}@{host}:{remote_port}"
+        f"-{bastion_user}@{bastion_host}:{bastion_port}-{run_id()}"
+    )
+    sock = hashlib.sha1(key.encode()).hexdigest()[:10]
+    return out + [
+        "-o",
+        "ControlMaster=auto",
+        "-o",
+        f"ControlPersist={persist}",
+        "-o",
+        f"ControlPath={cp_dir}/bastion-{sock}",
+    ]

@@ -7,6 +7,7 @@ import sys
 from lib import (
     awx_get_inventory_file,
     awx_get_vars,
+    control_opts,
     ensure_cert,
     find_executable,
     get_cert_config,
@@ -95,6 +96,11 @@ def main():
 
     if not remote_user:
         remote_user = bastion_user
+
+    # one control socket per target host, shared with the sftp/scp wrappers
+    argv = control_opts(
+        argv, host, remote_port, remote_user, bastion_user, bastion_host, bastion_port
+    )
 
     # short lived ssh certificate signed by OpenBao, renewed when about to expire
     cert_cfg = get_cert_config(

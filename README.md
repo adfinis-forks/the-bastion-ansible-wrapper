@@ -165,6 +165,28 @@ Note: inventory vars are only looked up when the bastion vars are not fully
 defined by the playbook environment or the configuration file. The OpenBao
 token itself must stay valid for the duration of the play.
 
+## SSH connection multiplexing (control sockets)
+
+The bastion runs `sshd` with `MaxSessions 1`: a multiplexed SSH connection
+can only carry one session at a time, so a control socket shared by several
+hosts (e.g. `ControlPath=%h-%p-%r`, which resolves to the bastion itself once
+the wrapper has rewritten the destination) breaks as soon as two hosts run in
+parallel.
+
+The wrappers therefore manage the control socket themselves: any
+`ControlMaster`, `ControlPersist` and `ControlPath` option received from
+Ansible or `ssh_config` is dropped and replaced with one socket per target
+host, bastion account and Ansible run (pid of the `ansible*` process), shared by the ssh, sftp
+and scp wrappers. Ansible runs the tasks of a host sequentially, so this never
+opens two sessions on the same bastion connection, while every task of a host
+reuses the connection (and its authentication). Simultaneous runs against the
+same host get their own sockets.
+
+| Variable | Description |
+|---|---|
+| `BASTION_CONTROL_PERSIST` | `ControlPersist` value (default `60s`), `no` disables the feature and leaves the options received from Ansible untouched |
+| `BASTION_CONTROL_PATH_DIR` | directory of the sockets (default `~/.ansible/cp`) |
+
 ## Using multiple inventories sources
 
 The wrapper is going to lookup the ansible inventory to look for the host and its vars.
