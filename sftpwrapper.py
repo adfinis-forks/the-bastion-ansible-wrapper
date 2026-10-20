@@ -10,6 +10,7 @@ from lib import (
     find_executable,
     get_cert_config,
     get_hostvars,
+    get_var_within,
     manage_conf_file,
 )
 
@@ -56,11 +57,17 @@ def main():
     # Read from inventory and environment variables
     if not bastion_host or not bastion_port or not bastion_user:
         hostvar = get_hostvars(host)
-        bastion_port = hostvar.get("bastion_port", os.getenv("BASTION_PORT", "22"))
-        bastion_user = hostvar.get(
-            "bastion_user", os.getenv("BASTION_USER", getpass.getuser())
+        # resolve bastion_user: "{{ bastion_username }}" like sshwrapper does
+        bastion_port = get_var_within(
+            hostvar.get("bastion_port", os.getenv("BASTION_PORT", "22")), hostvar
         )
-        bastion_host = hostvar.get("bastion_host", os.getenv("BASTION_HOST"))
+        bastion_user = get_var_within(
+            hostvar.get("bastion_user", os.getenv("BASTION_USER", getpass.getuser())),
+            hostvar,
+        )
+        bastion_host = get_var_within(
+            hostvar.get("bastion_host", os.getenv("BASTION_HOST")), hostvar
+        )
 
     if not remote_user:
         remote_user = bastion_user
